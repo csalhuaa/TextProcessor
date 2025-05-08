@@ -15,6 +15,8 @@ app.secret_key = os.urandom(24)
 CLOUDAMQP_URL = os.environ.get('CLOUDAMQP_URL', 'amqps://tnluigbk:x9gWN83qzJ3CIZjiKKAyg327wKNb9eA1@porpoise.rmq.cloudamqp.com/tnluigbk')
 url = urlparse(CLOUDAMQP_URL)
 
+server_started = False
+
 # Extraer componentes de la URL
 RABBIT_HOST = url.hostname
 RABBIT_USER = url.username
@@ -293,9 +295,25 @@ RPC_CLIENT = RpcClient(
     RABBIT_SSL
 )
 
+# Variable para controlar si el servidor se ha iniciado
+server_started = False
+
+# Crear una función para iniciar el servidor RPC
+def initialize_rpc_server():
+    global server_started
+    if not SERVER_STATUS["running"] and not server_started:
+        server_started = True
+        rpc_thread = threading.Thread(target=start_rpc_server)
+        rpc_thread.daemon = True
+        rpc_thread.start()
+        print("Servidor RPC iniciado")
+
 @app.route('/')
 def index():
     """Página principal."""
+    # Iniciar servidor RPC si no está en ejecución
+    initialize_rpc_server()
+    
     connected = RPC_CLIENT.is_connected()
     return render_template('index.html', 
                           operations=TEXT_OPERATIONS, 
@@ -380,32 +398,22 @@ def clear_history():
 @app.route('/health')
 def health_check():
     """Verificar estado de la aplicación y conexión RPC."""
+    # Iniciar servidor RPC si no está en ejecución
+    initialize_rpc_server()
+    
     return jsonify({
         'app': 'ok',
         'rpc_server': SERVER_STATUS,
         'rpc_client_connected': RPC_CLIENT.is_connected()
     })
 
-# Iniciar el servidor RPC cuando la aplicación Flask se inicie
-@app.before_first_request
-def initialize_rpc_server():
-    """Iniciar el servidor RPC antes de la primera solicitud."""
-    if not SERVER_STATUS["running"]:
-        rpc_thread = threading.Thread(target=start_rpc_server)
-        rpc_thread.daemon = True
-        rpc_thread.start()
-        print("Servidor RPC iniciado después de la primera solicitud")
-
 if __name__ == '__main__':
     # Obtener el puerto del entorno (Render lo proporciona)
     port = int(os.environ.get('PORT', 5000))
     print(f"Iniciando aplicación web en puerto: {port}")
     
-    # También iniciar el servidor RPC aquí para desarrollo local
-    if not SERVER_STATUS["running"]:
-        rpc_thread = threading.Thread(target=start_rpc_server)
-        rpc_thread.daemon = True
-        rpc_thread.start()
+    # Iniciar el servidor RPC para desarrollo local
+    initialize_rpc_server()
     
     # Iniciar la aplicación web Flask
     app.run(host='0.0.0.0', port=port)
