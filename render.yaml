@@ -1,0 +1,23 @@
+services:
+  # Aplicación web Flask
+  - type: web
+    name: textpro-web
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: CLOUDAMQP_URL
+        sync: false # La URL de CloudAMQP se configurará manualmente
+      - key: PORT
+        value: 10000
+    healthCheckPath: /health
+
+  # Servidor RPC como worker
+  - type: worker
+    name: textpro-rpc
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: CLOUDAMQP_URL
+        sync: false # La URL de CloudAMQP se configurará manualmente
