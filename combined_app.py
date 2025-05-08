@@ -48,42 +48,51 @@ class TextProcessingServer(object):
         self.channel = None
         
     def start(self):
-        """Iniciar el servidor RPC."""
-        try:
-            # Imprimir información de conexión
-            print(f"Usuario: {self.username}, vhost: {self.vhost}")
-            
-            # Crear conexión con RabbitMQ
-            self.connection = amqpstorm.Connection(
-                self.host,
-                self.username,
-                self.password,
-                virtual_host=self.vhost,
-                port=self.port,
-                ssl=self.ssl
-            )
-            self.channel = self.connection.channel()
-            
-            # Declarar la cola RPC
-            self.channel.queue.declare(self.rpc_queue)
-            
-            # Configurar calidad de servicio (QoS)
-            self.channel.basic.qos(prefetch_count=1)
-            
-            # Iniciar consumo de mensajes
-            self.channel.basic.consume(self._process_request, self.rpc_queue)
-            
-            print(f"[x] Servidor de Procesamiento de Texto iniciado. Esperando mensajes en la cola '{self.rpc_queue}'...")
-            SERVER_STATUS["running"] = True
-            
-            # Comenzar a consumir mensajes
-            self.channel.start_consuming()
-            
-        except Exception as e:
-            print(f"Error al iniciar el servidor RPC: {str(e)}")
-            SERVER_STATUS["running"] = False
-            SERVER_STATUS["errors"] += 1
-            raise
+        """Iniciar el servidor RPC con reconexión automática."""
+        while True:
+            try:
+                # Imprimir información de conexión
+                print(f"Usuario: {self.username}, vhost: {self.vhost}")
+                
+                # Crear conexión con RabbitMQ
+                self.connection = amqpstorm.Connection(
+                    self.host,
+                    self.username,
+                    self.password,
+                    virtual_host=self.vhost,
+                    port=self.port,
+                    ssl=self.ssl,
+                    heartbeat=30  # Configurar heartbeat más frecuente
+                )
+                self.channel = self.connection.channel()
+                
+                # Declarar la cola RPC
+                self.channel.queue.declare(self.rpc_queue)
+                
+                # Configurar calidad de servicio (QoS)
+                self.channel.basic.qos(prefetch_count=1)
+                
+                # Iniciar consumo de mensajes
+                self.channel.basic.consume(self._process_request, self.rpc_queue)
+                
+                print(f"[x] Servidor de Procesamiento de Texto iniciado. Esperando mensajes en la cola '{self.rpc_queue}'...")
+                SERVER_STATUS["running"] = True
+                
+                # Comenzar a consumir mensajes
+                self.channel.start_consuming()
+                
+            except amqpstorm.exception.AMQPConnectionError as e:
+                print(f"Conexión perdida: {str(e)}")
+                SERVER_STATUS["errors"] += 1
+                SERVER_STATUS["running"] = False
+                print("Intentando reconectar en 5 segundos...")
+                import time
+                time.sleep(5)
+            except Exception as e:
+                print(f"Error crítico en el servidor RPC: {str(e)}")
+                SERVER_STATUS["errors"] += 1
+                SERVER_STATUS["running"] = False
+                raise
             
     def _process_request(self, message):
         """Procesar solicitudes RPC entrantes."""
@@ -178,7 +187,8 @@ class RpcClient(object):
                 self.password,
                 virtual_host=self.vhost,
                 port=self.port,
-                ssl=self.ssl
+                ssl=self.ssl,
+                heartbeat=30  # Configurar heartbeat más frecuente
             )
             self.channel = self.connection.channel()
             self.channel.queue.declare(self.rpc_queue)
@@ -190,6 +200,17 @@ class RpcClient(object):
             return True
         except Exception as e:
             print(f"Error al conectar con RabbitMQ: {str(e)}")
+            return False
+
+    def ensure_connection(self):
+        """Asegurar que la conexión esté activa, reconectar si es necesario."""
+        try:
+            if not self.connection or not self.connection.is_open:
+                print("Reconectando cliente RPC...")
+                return self.open()
+            return True
+        except Exception as e:
+            print(f"Error al reconectar cliente RPC: {str(e)}")
             return False
 
     def _create_process_thread(self):
@@ -211,7 +232,12 @@ class RpcClient(object):
         self.queue[message.correlation_id] = message.body
 
     def send_request(self, payload):
+        """Enviar solicitud RPC con reconexión automática."""
         try:
+            # Asegurar que tenemos conexión
+            if not self.ensure_connection():
+                raise Exception("No se pudo establecer conexión con RabbitMQ")
+                
             # Create the Message object.
             message = Message.create(self.channel, payload)
             message.reply_to = self.callback_queue
@@ -327,7 +353,7 @@ def about():
 
 @app.route('/process', methods=['POST'])
 def process_text():
-    """Procesar texto vía RPC."""
+    """Procesar texto vía RPC con reintentos."""
     operation = request.form.get('operation')
     text = request.form.get('text')
     
@@ -335,57 +361,67 @@ def process_text():
         flash('Por favor, completa todos los campos', 'danger')
         return redirect(url_for('index'))
     
-    # Verificar conexión
-    if not RPC_CLIENT.is_connected():
-        # Intentar reconectar
-        if not RPC_CLIENT.open():
-            flash('Error: No se pudo conectar con el servidor RPC', 'danger')
+    # Verificar conexión y reintentar hasta 3 veces
+    max_retries = 3
+    for attempt in range(max_retries):
+        if not RPC_CLIENT.is_connected():
+            # Intentar reconectar
+            if not RPC_CLIENT.ensure_connection():
+                if attempt == max_retries - 1:
+                    flash('Error: No se pudo conectar con el servidor RPC', 'danger')
+                    return redirect(url_for('index'))
+                continue
+        
+        # Preparar payload
+        payload = f"{operation}:{text}"
+        
+        # Enviar solicitud RPC
+        corr_id = RPC_CLIENT.send_request(payload)
+        
+        if not corr_id:
+            if attempt == max_retries - 1:
+                flash('Error al enviar la solicitud', 'danger')
+                return redirect(url_for('index'))
+            continue
+        
+        # Esperar respuesta (con timeout)
+        max_wait = 100  # 10 segundos máximo
+        counter = 0
+        
+        while RPC_CLIENT.queue[corr_id] is None:
+            sleep(0.1)
+            counter += 1
+            if counter >= max_wait:
+                break
+        
+        # Si obtuvimos respuesta, procesarla
+        if RPC_CLIENT.queue[corr_id] is not None:
+            # Obtener resultado
+            result = RPC_CLIENT.queue[corr_id]
+            
+            # Encontrar el nombre descriptivo de la operación
+            operation_name = operation
+            for op in TEXT_OPERATIONS:
+                if op['id'] == operation:
+                    operation_name = op['name']
+                    break
+            
+            # Guardar en historial
+            save_history(operation_name, text, result)
+            
+            # Si es AJAX, devolver JSON
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({
+                    'success': True,
+                    'operation': operation_name,
+                    'result': result
+                })
+            
+            # Si no es AJAX, redireccionar con mensaje
+            flash(f'Operación completada: {operation_name}', 'success')
             return redirect(url_for('index'))
     
-    # Preparar payload
-    payload = f"{operation}:{text}"
-    
-    # Enviar solicitud RPC
-    corr_id = RPC_CLIENT.send_request(payload)
-    
-    if not corr_id:
-        flash('Error al enviar la solicitud', 'danger')
-        return redirect(url_for('index'))
-    
-    # Esperar respuesta (con timeout)
-    max_wait = 100  # 10 segundos máximo
-    counter = 0
-    
-    while RPC_CLIENT.queue[corr_id] is None:
-        sleep(0.1)
-        counter += 1
-        if counter >= max_wait:
-            flash('Tiempo de espera agotado. No se recibió respuesta del servidor', 'warning')
-            return redirect(url_for('index'))
-    
-    # Obtener resultado
-    result = RPC_CLIENT.queue[corr_id]
-    
-    # Encontrar el nombre descriptivo de la operación
-    operation_name = operation
-    for op in TEXT_OPERATIONS:
-        if op['id'] == operation:
-            operation_name = op['name']
-            break
-    
-    # Guardar en historial
-    save_history(operation_name, text, result)
-    
-    # Si es AJAX, devolver JSON
-    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-        return jsonify({
-            'success': True,
-            'operation': operation_name,
-            'result': result
-        })
-    
-    # Si no es AJAX, redireccionar con mensaje
-    flash(f'Operación completada: {operation_name}', 'success')
+    flash('Error al procesar la solicitud después de varios intentos', 'danger')
     return redirect(url_for('index'))
 
 @app.route('/clear-history', methods=['POST'])
