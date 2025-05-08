@@ -386,15 +386,26 @@ def health_check():
         'rpc_client_connected': RPC_CLIENT.is_connected()
     })
 
+# Iniciar el servidor RPC cuando la aplicación Flask se inicie
+@app.before_first_request
+def initialize_rpc_server():
+    """Iniciar el servidor RPC antes de la primera solicitud."""
+    if not SERVER_STATUS["running"]:
+        rpc_thread = threading.Thread(target=start_rpc_server)
+        rpc_thread.daemon = True
+        rpc_thread.start()
+        print("Servidor RPC iniciado después de la primera solicitud")
+
 if __name__ == '__main__':
-    # Iniciar el servidor RPC en un hilo separado
-    rpc_thread = threading.Thread(target=start_rpc_server)
-    rpc_thread.daemon = True
-    rpc_thread.start()
-    
     # Obtener el puerto del entorno (Render lo proporciona)
     port = int(os.environ.get('PORT', 5000))
     print(f"Iniciando aplicación web en puerto: {port}")
+    
+    # También iniciar el servidor RPC aquí para desarrollo local
+    if not SERVER_STATUS["running"]:
+        rpc_thread = threading.Thread(target=start_rpc_server)
+        rpc_thread.daemon = True
+        rpc_thread.start()
     
     # Iniciar la aplicación web Flask
     app.run(host='0.0.0.0', port=port)
