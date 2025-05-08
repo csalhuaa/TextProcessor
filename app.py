@@ -12,7 +12,7 @@ app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
 # Configuración de CloudAMQP
-CLOUDAMQP_URL = os.environ.get('CLOUDAMQP_URL', 'amqps://tnluigbk:x9gWN83qzJ3CIZjiKKAyg327wKNb9eA1@porpoise.rmq.cloudamqp.com/tnluigbk')
+CLOUDAMQP_URL = os.environ.get('CLOUDAMQP_URL', 'amqps://kklgctvg:EVy4jXbtnj6KOWbWmQLMV1LwjsAJmqy0@jaragua.lmq.cloudamqp.com/kklgctvg')
 url = urlparse(CLOUDAMQP_URL)
 
 # Extraer componentes de la URL
